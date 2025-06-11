@@ -3,7 +3,7 @@
 use core::error::Error;
 use dotenv::dotenv;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -63,6 +63,14 @@ async fn gitlab_get_data(
 ) {
     info!("starting...");
 
+    // Parse filter set from env
+    let filter_set: Option<HashSet<String>> = env::var("GITLAB_FILTER")
+        .ok()
+        .map(|val| val.split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect());
+
     // Create an HTTP client
     let http_client = match reqwest::ClientBuilder::new()
         .danger_accept_invalid_certs(accept_invalid_certs)
@@ -80,22 +88,19 @@ async fn gitlab_get_data(
     // One to get the projects tokens
     // One to get the groups tokens
     // The users tokens are handled differently, because it can fail but it should *not* be a hard failure.
-    // https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html#method.join_all
     let mut join_set: JoinSet<Result<String, Box<dyn Error + Send + Sync>>> = JoinSet::new();
 
     // Get tokens for all projects
     let http_client_clone1 = http_client.clone();
     let hostname_clone1 = hostname.clone();
     let gitlab_token_clone1 = gitlab_token.clone();
+    let filter_set_clone1 = filter_set.clone();
+    let owned_entities_only_clone1 = owned_entities_only;
     join_set.spawn(async move {
         let mut res = String::new();
-        #[expect(
-            clippy::as_conversions,
-            reason = "using 'as u8' is safe as long as gitlab::AccessLevel values are < 256"
-        )]
         let mut url = format!(
             "https://{hostname_clone1}/api/v4/projects?per_page=100&archived=false{}",
-            if owned_entities_only {
+            if owned_entities_only_clone1 {
                 format!("&min_access_level={}", gitlab::AccessLevel::Owner as u8)
             } else {
                 String::new()
@@ -104,6 +109,12 @@ async fn gitlab_get_data(
         let projects =
             gitlab::Project::get_all(&http_client_clone1, url, &gitlab_token_clone1).await?;
         for project in projects {
+            let name = project.path_with_namespace.to_ascii_lowercase();
+            if let Some(ref filter) = filter_set_clone1 {
+                if !filter.contains(&name) {
+                    continue;
+                }
+            }
             url = format!(
                 "https://{hostname_clone1}/api/v4/projects/{}/access_tokens?per_page=100",
                 project.id
@@ -128,18 +139,14 @@ async fn gitlab_get_data(
     let http_client_clone2 = http_client.clone();
     let hostname_clone2 = hostname.clone();
     let gitlab_token_clone2 = gitlab_token.clone();
+    let filter_set_clone2 = filter_set.clone();
+    let owned_entities_only_clone2 = owned_entities_only;
     join_set.spawn(async move {
-        // This will be used by gitlab::get_group_full_path() to avoid generating multiple API queries for the same group id
         let mut group_id_cache: HashMap<usize, Group> = HashMap::new();
-
         let mut res = String::new();
-        #[expect(
-            clippy::as_conversions,
-            reason = "using 'as u8' is safe as long as gitlab::AccessLevel values are < 256"
-        )]
         let mut url = format!(
             "https://{hostname_clone2}/api/v4/groups?per_page=100&archived=false{}",
-            if owned_entities_only {
+            if owned_entities_only_clone2 {
                 format!("&min_access_level={}", gitlab::AccessLevel::Owner as u8)
             } else {
                 String::new()
@@ -147,6 +154,12 @@ async fn gitlab_get_data(
         );
         let groups = gitlab::Group::get_all(&http_client_clone2, url, &gitlab_token_clone2).await?;
         for group in groups {
+            let name = group.path.to_ascii_lowercase();
+            if let Some(ref filter) = filter_set_clone2 {
+                if !filter.contains(&name) {
+                    continue;
+                }
+            }
             url = format!(
                 "https://{hostname_clone2}/api/v4/groups/{}/access_tokens?per_page=100",
                 group.id
@@ -176,13 +189,9 @@ async fn gitlab_get_data(
 
     // Waiting for all our async tasks
     let task_outputs = join_set.join_all().await;
-
-    // This variable will contain the message we want to send
     let mut return_value = String::new();
-
-    // Building `return_value` with the results we got
-    for task_ouput in task_outputs {
-        match task_ouput {
+    for task_output in task_outputs {
+        match task_output {
             Ok(value) => return_value.push_str(&value),
             Err(err) => {
                 let msg = format!("Failed to get tokens in async task: {err:?}");
@@ -196,8 +205,7 @@ async fn gitlab_get_data(
     // Get tokens for all users
     let mut res = String::new();
     let mut url = format!("https://{hostname}/api/v4/users?per_page=100");
-    // First, we must check that the token we are using have the necessary rights
-    // If not, we return an empty string
+    let filter_set_clone3 = filter_set.clone();
     let user_tokens: Result<String, Box<dyn Error + Send + Sync>> = async {
         let current_user = gitlab::get_current_user(&http_client, &hostname, &gitlab_token).await?;
         if current_user.is_admin {
@@ -213,6 +221,7 @@ async fn gitlab_get_data(
             url = format!("https://{hostname}/api/v4/personal_access_tokens?per_page=100");
             let mut personnal_access_tokens =
                 gitlab::PersonalAccessToken::get_all(&http_client, url, &gitlab_token).await?;
+
             // Retain personnal access tokens of human users
             personnal_access_tokens.retain(|pat| user_ids.contains_key(&pat.user_id));
 
@@ -220,17 +229,25 @@ async fn gitlab_get_data(
                 let username = user_ids
                     .get(&personnal_access_token.user_id)
                     .map_or("", |val| val);
+
+                // Filtering
+                let name = username.to_ascii_lowercase();
+                if let Some(ref filter) = filter_set_clone3 {
+                    if !filter.contains(&name) {
+                        continue;
+                    }
+                }
+
                 let token_str = prometheus_metrics::build(&Token::User {
                     token: personnal_access_token,
                     full_path: username.to_owned()
                 })?;
                 res.push_str(&token_str);
             }
-
             Ok(res)
         } else {
             let msg =
-            "Can't get users tokens with the current GITLAB_TOKEN (current_user.is_admin == false)";
+                "Can't get users tokens with the current GITLAB_TOKEN (current_user.is_admin == false)";
             warn!("{msg}");
             Ok(String::new())
         }
@@ -265,6 +282,7 @@ pub async fn gitlab_tokens_actor(
         error!("env variable GITLAB_TOKEN is not defined");
         return;
     };
+
     let Ok(hostname) = env::var("GITLAB_HOSTNAME") else {
         error!("env variable GITLAB_HOSTNAME is not defined");
         return;
@@ -285,7 +303,7 @@ pub async fn gitlab_tokens_actor(
         Err(_) => false,
     };
 
-    // Checking OWNED_ENTITIES_ONLY env variable
+    // Checking OWNED_ENTITIES_ONLY env variable...
     let owned_entities_only = match env::var("OWNED_ENTITIES_ONLY") {
         Ok(value) => {
             if value == "yes" {

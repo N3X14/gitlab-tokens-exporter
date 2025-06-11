@@ -24,6 +24,8 @@ Optional environment variables **not** set by default:
 ```
 ACCEPT_INVALID_CERTS=yes (DANGEROUS!!! disables HTTPS certificate validation when connecting to gitlab)
 OWNED_ENTITIES_ONLY=yes (checks only owned projects and groups - useful for gitlab.com)
+GITLAB_FILTER: Comma-separated list of user, group, or project names/paths. Only tokens for these entities will be exported. 
+Example: GITLAB_FILTER=alice,devops/backend,marketing
 ```
 
 ## Getting Started
