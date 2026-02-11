@@ -36,6 +36,10 @@ pub fn build(gitlab_token: &Token) -> Result<String, Box<dyn Error + Send + Sync
     };
 
     let metric_name = "gitlab_token_expiration";
+    let days_to_expiration = match expires_at {
+        Some(expires_at) => (expires_at - date_now).num_days() as f64,
+        None => f64::NAN,
+    };
 
     writeln!(res, "# HELP {metric_name} Days before GitLab token expires")?;
     writeln!(res, "# TYPE {metric_name} gauge")?;
@@ -43,7 +47,7 @@ pub fn build(gitlab_token: &Token) -> Result<String, Box<dyn Error + Send + Sync
     write!(
         res,
         "{metric_name}{{token_type=\"{token_type}\",full_path=\"{full_path}\",token_name=\"{name}\",active=\"{active}\"}} {}\n",
-        (expires_at - date_now).num_days()
+        days_to_expiration
     )?;
 
     Ok(res)

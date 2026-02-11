@@ -45,8 +45,8 @@ pub struct AccessToken {
     pub access_level: AccessLevel,
     /// Active
     pub active: bool,
-    /// Expiration date
-    pub expires_at: chrono::NaiveDate,
+    /// Expiration date (null when no expiration is set)
+    pub expires_at: Option<chrono::NaiveDate>,
     /// Name
     pub name: String,
     /// Revoked
@@ -191,8 +191,8 @@ pub trait OffsetBasedPagination<T: for<'serde> serde::Deserialize<'serde>> {
 pub struct PersonalAccessToken {
     /// Active
     pub active: bool,
-    /// Expiration date
-    pub expires_at: chrono::NaiveDate,
+    /// Expiration date (null when no expiration is set)
+    pub expires_at: Option<chrono::NaiveDate>,
     /// Name
     pub name: String,
     /// Revoked
